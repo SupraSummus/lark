@@ -30,62 +30,72 @@ class _Parser:
         self.end_state = parse_table.end_state
         self.callbacks = callbacks
 
+    def get_action(self, parsing_state, token):
+        state_stack = parsing_state[0]
+        state = state_stack[-1]
+        try:
+            return self.states[state][token.type]
+        except KeyError:
+            expected = [s for s in self.states[state].keys() if s.isupper()]
+            raise UnexpectedToken(token, expected, state=state)
+
+    def reduce(self, parsing_state, rule):
+        state_stack, value_stack = parsing_state
+        size = len(rule.expansion)
+        if size:
+            s = value_stack[-size:]
+            del state_stack[-size:]
+            del value_stack[-size:]
+        else:
+            s = []
+
+        value = self.callbacks[rule](s)
+
+        _action, new_state = self.states[state_stack[-1]][rule.origin.name]
+        assert _action is Shift
+        state_stack.append(new_state)
+        value_stack.append(value)
+
+    def initial_parsing_state(self, set_state=None):
+        if set_state: set_state(self.start_state)
+        return (
+            [self.start_state],  # state stack
+            [],  # value stack
+        )
+
+    def next_parsing_state(self, parsing_state, token, set_state=None):
+        """Produce parser state after consuming given token."""
+        state_stack, value_stack = parsing_state
+        while True:
+            action, arg = self.get_action(parsing_state, token)
+
+            if action is Shift:
+                state_stack.append(arg)
+                value_stack.append(token)
+                if set_state: set_state(arg)
+                break # next token
+            else:
+                self.reduce(parsing_state, arg)
+
     def parse(self, seq, set_state=None):
         token = None
         stream = iter(seq)
-        states = self.states
 
-        state_stack = [self.start_state]
-        value_stack = []
+        parsing_state = self.initial_parsing_state(set_state)
+        state_stack, value_stack = parsing_state
 
-        if set_state: set_state(self.start_state)
-
-        def get_action(token):
-            state = state_stack[-1]
-            try:
-                return states[state][token.type]
-            except KeyError:
-                expected = [s for s in states[state].keys() if s.isupper()]
-                raise UnexpectedToken(token, expected, state=state)
-
-        def reduce(rule):
-            size = len(rule.expansion)
-            if size:
-                s = value_stack[-size:]
-                del state_stack[-size:]
-                del value_stack[-size:]
-            else:
-                s = []
-
-            value = self.callbacks[rule](s)
-
-            _action, new_state = states[state_stack[-1]][rule.origin.name]
-            assert _action is Shift
-            state_stack.append(new_state)
-            value_stack.append(value)
-
-        # Main LALR-parser loop
+        # feed input tokens into the parser
         for token in stream:
-            while True:
-                action, arg = get_action(token)
-                assert arg != self.end_state
+            self.next_parsing_state(parsing_state, token, set_state)
 
-                if action is Shift:
-                    state_stack.append(arg)
-                    value_stack.append(token)
-                    if set_state: set_state(arg)
-                    break # next token
-                else:
-                    reduce(arg)
-
+        # feed end-of-input token into parser
         token = Token.new_borrow_pos('$END', '', token) if token else Token('$END', '', 0, 1, 1)
-        while True:
-            _action, arg = get_action(token)
-            if _action is Shift:
-                assert arg == self.end_state
-                val ,= value_stack
-                return val
-            else:
-                reduce(arg)
+        self.next_parsing_state(parsing_state, token)
+
+        # final sanity checks
+        assert len(value_stack) == 2
+        assert value_stack[1] == token
+
+        return value_stack[0]
 
 ###}
